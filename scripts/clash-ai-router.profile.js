@@ -3,6 +3,8 @@
 //
 // It creates stable AI routing groups while keeping real node choices dynamic.
 // It does not contain subscription URLs or private node data.
+// It only filters costly nodes inside the groups it creates; it does not delete
+// nodes from your original subscription or unrelated proxy groups.
 
 function main(config, profileName) {
   const names = {
@@ -32,11 +34,10 @@ function main(config, profileName) {
     items.filter((item, index, array) => item && array.indexOf(item) === index);
 
   const proxyList = Array.isArray(config.proxies) ? config.proxies : [];
-  config.proxies = proxyList.filter(
-    (proxy) => !costlyNodePattern.test(proxy.name || "")
+  const proxyNames = proxyList.map((proxy) => proxy.name).filter(Boolean);
+  const nonCostlyProxyNames = proxyNames.filter(
+    (name) => !costlyNodePattern.test(name)
   );
-
-  const proxyNames = config.proxies.map((proxy) => proxy.name).filter(Boolean);
   const pickNodes = (patterns) =>
     proxyNames.filter((name) => patterns.some((pattern) => pattern.test(name)));
 
@@ -49,29 +50,28 @@ function main(config, profileName) {
   const normalNodes = pickNodes(normalNodePatterns);
   const safeForeignNodes = unique(normalNodes.filter(isAllowedAiNode));
   const expandedAiNodes = unique([...aiNodes, ...safeForeignNodes]);
-  const fallbackNodes = expandedAiNodes.length ? expandedAiNodes : proxyNames;
+
+  // If no recommended AI node can be identified from names, keep the config valid
+  // by using non-costly nodes. The helper's `test --strict` will still fail and
+  // ask the user to check node naming or choose a node manually.
+  const fallbackNodes = expandedAiNodes.length
+    ? expandedAiNodes
+    : nonCostlyProxyNames;
+  const finalFallbackNodes = fallbackNodes.length ? fallbackNodes : ["DIRECT"];
 
   config["proxy-groups"] = Array.isArray(config["proxy-groups"])
     ? config["proxy-groups"]
     : [];
 
-  config["proxy-groups"] = config["proxy-groups"]
-    .filter(
-      (group) =>
-        ![
-          names.aiAuto,
-          names.aiSelect,
-          names.foreignAuto,
-          names.foreignSelect,
-        ].includes(group.name)
-    )
-    .map((group) => {
-      if (!Array.isArray(group.proxies)) return group;
-      const proxies = group.proxies.filter(
-        (name) => !costlyNodePattern.test(name)
-      );
-      return { ...group, proxies: proxies.length ? proxies : group.proxies };
-    });
+  config["proxy-groups"] = config["proxy-groups"].filter(
+    (group) =>
+      ![
+        names.aiAuto,
+        names.aiSelect,
+        names.foreignAuto,
+        names.foreignSelect,
+      ].includes(group.name)
+  );
 
   const foreignChoices = unique([
     names.foreignAuto,
@@ -93,7 +93,7 @@ function main(config, profileName) {
     {
       name: names.aiAuto,
       type: "url-test",
-      proxies: fallbackNodes,
+      proxies: finalFallbackNodes,
       url: "https://chatgpt.com/cdn-cgi/trace",
       interval: 300,
       tolerance: 80,
@@ -107,7 +107,7 @@ function main(config, profileName) {
     {
       name: names.foreignAuto,
       type: "url-test",
-      proxies: safeForeignNodes.length ? safeForeignNodes : fallbackNodes,
+      proxies: safeForeignNodes.length ? safeForeignNodes : finalFallbackNodes,
       url: "http://cp.cloudflare.com/generate_204",
       interval: 300,
       tolerance: 80,
@@ -116,7 +116,7 @@ function main(config, profileName) {
     {
       name: names.foreignSelect,
       type: "select",
-      proxies: normalChoices.length ? normalChoices : fallbackNodes,
+      proxies: normalChoices.length ? normalChoices : finalFallbackNodes,
     }
   );
 
