@@ -1,0 +1,14 @@
+{
+  "aiSelectGroup": "AI代理",
+  "aiAutoGroup": "AI自动可用",
+  "foreignSelectGroup": "普通国外",
+  "foreignAutoGroup": "国外自动可用",
+  "costlyNodePattern": "(?:\\b12(?:\\.0+)?x\\b|12(?:\\.0+)?倍|12倍流量)",
+  "aiNodePatterns": [
+    "ChatGPT",
+    "\\bRe\\b",
+    "住宅|静态|家宽|ISP|Residential|Static"
+  ],
+  "allowedRegionPattern": "台湾|Taiwan|日本|Japan|美国|United\\s*States|USA|\\bUS\\b|韩国|South\\s*Korea|德国|Germany|英国|United\\s*Kingdom|UK|巴西|Brazil|澳大利亚|Australia|Sydney|新加坡|Singapore|越南|Vietnam|马来西亚|Malaysia",
+  "blockedRegionPattern": "中国|China|香港|Hong\\s*Kong|\\bHK\\b|澳门|Macau|Russia|俄罗斯|Iran|伊朗|North\\s*Korea|朝鲜|Syria|叙利亚|Cuba|古巴|Venezuela|委内瑞拉"
+}
