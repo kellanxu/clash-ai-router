@@ -32,8 +32,28 @@ The public repository should contain only reusable logic and examples.
 1. Provide a Clash Verge Rev profile script.
 2. Provide a local helper that can install the script into the current profile script slot.
 3. Back up before writing.
-4. Check whether the expected groups and rules exist.
-5. Leave subscription refresh to Clash Verge Rev.
+4. Provide `doctor` so humans and agents can check install prerequisites.
+5. Provide `test --strict` so agents have a non-ambiguous success/failure signal.
+6. Provide rollback and uninstall through backup restoration.
+7. Leave subscription refresh to Clash Verge Rev, but do not report success until runtime verification passes.
+
+## Strict success criteria
+
+`python3 bin/clash-ai-router test --strict` must return exit code `0` only when all of these are true:
+
+- the current profile script contains Clash AI Router;
+- key AI domain rules exist in the installed script;
+- Mihomo runtime groups can be read;
+- `AI自动可用` exists;
+- `AI代理` exists;
+- `国外自动可用` exists;
+- `普通国外` exists;
+- `AI代理` points to `AI自动可用`;
+- `AI自动可用` has at least one real proxy candidate;
+- `AI自动可用` does not include costly `12x`-style candidates;
+- at least one AI candidate appears to be in an allowed AI region.
+
+Warnings are acceptable in `status`, but not in strict verification.
 
 ## Non-goals
 
@@ -41,3 +61,4 @@ The public repository should contain only reusable logic and examples.
 - No attempt to bypass laws, network rules, or service terms.
 - No collection of public node lists.
 - No built-in subscription provider.
+- No blind editing of Clash Verge Rev `profiles.yaml` when the script slot cannot be identified.
