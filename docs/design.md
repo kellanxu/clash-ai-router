@@ -34,7 +34,7 @@ The public repository should contain only reusable logic and examples.
 3. Back up before writing.
 4. Provide `doctor` so humans and agents can check install prerequisites.
 5. Provide `test --strict` so agents have a non-ambiguous success/failure signal.
-6. Provide rollback and uninstall through backup restoration.
+6. Provide rollback and uninstall through a stable pre-install backup so repeated installs do not destroy the user's original script. Do not silently restore unrelated `.bak-*` files.
 7. Leave subscription refresh to Clash Verge Rev, but do not report success until runtime verification passes.
 
 ## Strict success criteria
@@ -50,7 +50,7 @@ The public repository should contain only reusable logic and examples.
 - `普通国外` exists;
 - `AI代理` points to `AI自动可用`;
 - `AI自动可用` has at least one real proxy candidate;
-- `AI自动可用` does not include costly `12x`-style candidates;
+- `AI自动可用` does not include costly high-multiplier candidates such as `5x`, `8x`, `10x`, or `12x`;
 - at least one AI candidate appears to be in an allowed AI region.
 
 Warnings are acceptable in `status`, but not in strict verification.

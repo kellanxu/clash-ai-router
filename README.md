@@ -9,12 +9,12 @@
 - 给 AI 服务创建专门分组，不和普通国外流量混在一起。
 - 给 AI 服务创建 `url-test` 自动测速分组，线路不可用时自动切到更可用的候选节点。
 - 保留手动兜底分组，出问题时还能自己选。
-- 默认避免高倍率、高成本节点进入 AI 自动分组，例如 `12x`。
+- 默认避免高倍率、高成本节点进入 AI 自动分组，例如 `5x`、`8x`、`10x`、`12x`；保留常见低倍率候选，例如 `2x`、`3x`、`4x`。
 - 不保存、不上传、不公开你的订阅地址和真实节点信息。
 
 ## 当前状态
 
-这是最小可用版本，优先支持：
+这是最小可用版本，当前仅支持：
 
 - macOS
 - Clash Verge Rev
@@ -87,7 +87,7 @@ bash install.sh
 
 1. 检查本机环境。
 2. 找到当前 Clash Verge Rev profile script。
-3. 安装前备份旧脚本。
+3. 保存安装前原始脚本，并创建时间戳备份。
 4. 写入 Clash AI Router profile script。
 5. 尝试做严格验收。
 
@@ -127,7 +127,7 @@ python3 bin/clash-ai-router test --strict
 只有下面条件全部满足，才算安装完成：
 
 - 当前 Clash Verge Rev profile script 已写入 Clash AI Router。
-- 原 profile script 已备份，或目标脚本原本不存在。
+- 原 profile script 已保存为安装前备份，或目标脚本原本不存在。
 - 刷新配置后，运行时存在：
   - `AI自动可用`
   - `AI代理`
@@ -136,7 +136,7 @@ python3 bin/clash-ai-router test --strict
 - `AI代理` 当前指向 `AI自动可用`。
 - AI 域名规则已经写入 profile script。
 - `AI自动可用` 有真实代理候选。
-- `AI自动可用` 没有包含高倍率候选，例如 `12x`。
+- `AI自动可用` 没有包含高倍率候选，例如 `5x`、`8x`、`10x`、`12x`。
 - 能识别到至少一个看起来适合 AI 的地区候选。
 
 Agent 或脚本不能用 `status` 的输出代替验收。**最终验收必须看：**
@@ -165,7 +165,7 @@ python3 bin/clash-ai-router install --dry-run
 python3 bin/clash-ai-router install
 ```
 
-备份当前 profile script，然后写入 Clash AI Router profile script。
+保存安装前原始脚本，创建时间戳备份，然后写入 Clash AI Router profile script。重复安装不会覆盖安装前原始备份。
 
 ```bash
 python3 bin/clash-ai-router status
@@ -189,13 +189,13 @@ python3 bin/clash-ai-router select-auto
 python3 bin/clash-ai-router rollback
 ```
 
-恢复最近一次安装前备份。
+恢复安装前原始备份。为了避免误恢复其他工具生成的备份，默认只认 `*.before-clash-ai-router`；如需恢复其他备份，请显式使用 `--backup`。
 
 ```bash
 python3 bin/clash-ai-router uninstall
 ```
 
-通过恢复最近备份来卸载 Clash AI Router。为了避免误删用户自己的脚本，没有备份时不会自动清空当前脚本。
+通过恢复安装前原始备份来卸载 Clash AI Router。为了避免误删用户自己的脚本，没有备份时不会自动清空当前脚本。
 
 ## 默认分组
 
@@ -259,7 +259,7 @@ MIHOMO_SOCKET=/path/to/mihomo.sock python3 bin/clash-ai-router test --strict
 
 ### 会不会改坏我原来的节点？
 
-安装前会备份旧 profile script。当前版本只在自己创建的 AI/普通自动分组里排除高倍率节点，不会从你的原始订阅里删除真实节点，也不会清空无关分组。
+安装前会保存旧 profile script。当前版本只在自己创建的 AI/普通自动分组里排除高倍率节点，不会从你的原始订阅里删除真实节点，也不会改写无关分组。
 
 需要恢复时运行：
 

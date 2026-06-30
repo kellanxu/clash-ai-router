@@ -5,6 +5,7 @@
 // It does not contain subscription URLs or private node data.
 // It only filters costly nodes inside the groups it creates; it does not delete
 // nodes from your original subscription or unrelated proxy groups.
+// CLASH_AI_ROUTER_PROFILE_SCRIPT_V1
 
 function main(config, profileName) {
   const names = {
@@ -14,10 +15,13 @@ function main(config, profileName) {
     foreignSelect: "普通国外",
   };
 
-  const costlyNodePattern = /(?:\b12(?:\.0+)?x\b|12(?:\.0+)?倍|12倍流量)/i;
+  const costlyNodePattern =
+    /(?:\b(?:[5-9]|[1-9]\d+)(?:\.0+)?x\b|(?:[5-9]|[1-9]\d+)(?:\.0+)?倍(?:流量)?|高倍|高倍率|昂贵|贵)/i;
   const aiNodePatterns = [
     /ChatGPT/i,
-    /\bRe\b/i,
+    /OpenAI/i,
+    /Claude/i,
+    /Gemini/i,
     /住宅|静态|家宽|ISP|Residential|Static/i,
   ];
   const normalNodePatterns = [
@@ -59,11 +63,15 @@ function main(config, profileName) {
     : nonCostlyProxyNames;
   const finalFallbackNodes = fallbackNodes.length ? fallbackNodes : ["DIRECT"];
 
-  config["proxy-groups"] = Array.isArray(config["proxy-groups"])
+  const previousGroups = Array.isArray(config["proxy-groups"])
     ? config["proxy-groups"]
     : [];
+  const previousGroup = (name) =>
+    previousGroups.find((group) => group && group.name === name) || {};
+  const previousChoices = (name) =>
+    Array.isArray(previousGroup(name).proxies) ? previousGroup(name).proxies : [];
 
-  config["proxy-groups"] = config["proxy-groups"].filter(
+  config["proxy-groups"] = previousGroups.filter(
     (group) =>
       ![
         names.aiAuto,
@@ -73,50 +81,51 @@ function main(config, profileName) {
       ].includes(group.name)
   );
 
-  const foreignChoices = unique([
-    names.foreignAuto,
-    ...safeForeignNodes,
-    "DIRECT",
-  ]);
   const normalChoices = unique([names.foreignAuto, ...safeForeignNodes]);
-
-  config["proxy-groups"] = config["proxy-groups"].map((group) => {
-    if (group.name !== "🔰国外流量") return group;
-    return {
-      ...group,
-      type: "select",
-      proxies: foreignChoices.length ? foreignChoices : group.proxies,
-    };
-  });
 
   config["proxy-groups"].unshift(
     {
+      ...previousGroup(names.aiAuto),
       name: names.aiAuto,
       type: "url-test",
       proxies: finalFallbackNodes,
-      url: "https://chatgpt.com/cdn-cgi/trace",
-      interval: 300,
-      tolerance: 80,
-      lazy: true,
+      url: previousGroup(names.aiAuto).url || "https://chatgpt.com/cdn-cgi/trace",
+      interval: previousGroup(names.aiAuto).interval || 300,
+      tolerance: previousGroup(names.aiAuto).tolerance || 80,
+      lazy: previousGroup(names.aiAuto).lazy ?? true,
     },
     {
+      ...previousGroup(names.aiSelect),
       name: names.aiSelect,
       type: "select",
-      proxies: unique([names.aiAuto, ...expandedAiNodes]),
+      proxies: unique([
+        names.aiAuto,
+        ...expandedAiNodes,
+        ...previousChoices(names.aiSelect).filter(
+          (name) => !costlyNodePattern.test(name)
+        ),
+      ]),
     },
     {
+      ...previousGroup(names.foreignAuto),
       name: names.foreignAuto,
       type: "url-test",
       proxies: safeForeignNodes.length ? safeForeignNodes : finalFallbackNodes,
-      url: "http://cp.cloudflare.com/generate_204",
-      interval: 300,
-      tolerance: 80,
-      lazy: true,
+      url: previousGroup(names.foreignAuto).url || "http://cp.cloudflare.com/generate_204",
+      interval: previousGroup(names.foreignAuto).interval || 300,
+      tolerance: previousGroup(names.foreignAuto).tolerance || 80,
+      lazy: previousGroup(names.foreignAuto).lazy ?? true,
     },
     {
+      ...previousGroup(names.foreignSelect),
       name: names.foreignSelect,
       type: "select",
-      proxies: normalChoices.length ? normalChoices : finalFallbackNodes,
+      proxies: unique([
+        ...(normalChoices.length ? normalChoices : finalFallbackNodes),
+        ...previousChoices(names.foreignSelect).filter(
+          (name) => !costlyNodePattern.test(name)
+        ),
+      ]),
     }
   );
 

@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 
 APP_DIR = pathlib.Path(
@@ -23,19 +24,29 @@ APP_DIR = pathlib.Path(
 ).expanduser()
 PROFILE_SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "clash-ai-router.profile.js"
 SOCKET = pathlib.Path(os.environ.get("MIHOMO_SOCKET", "/tmp/verge/verge-mihomo.sock"))
+CURL_CONNECT_TIMEOUT = os.environ.get("CLASH_AI_ROUTER_CONNECT_TIMEOUT", "2")
+CURL_MAX_TIME = os.environ.get("CLASH_AI_ROUTER_MAX_TIME", "8")
 
-MARKER = "Clash AI Router profile script"
+MARKER = "CLASH_AI_ROUTER_PROFILE_SCRIPT_V1"
 AI_AUTO = "AI自动可用"
 AI_SELECT = "AI代理"
 LEGACY_AI_SELECT = "AI住宅IP"
 FOREIGN_AUTO = "国外自动可用"
 FOREIGN_SELECT = "普通国外"
 EXPECTED_GROUPS = [AI_AUTO, AI_SELECT, FOREIGN_AUTO, FOREIGN_SELECT]
+ORIGINAL_BACKUP_SUFFIX = ".before-clash-ai-router"
 
-COSTLY_NODE_RE = re.compile(r"(?:\b12(?:\.0+)?x\b|12(?:\.0+)?倍|12倍流量)", re.I)
+COSTLY_NODE_RE = re.compile(
+    r"(?:\b(?:[5-9]|[1-9]\d+)(?:\.0+)?x\b|"
+    r"(?:[5-9]|[1-9]\d+)(?:\.0+)?倍(?:流量)?|"
+    r"高倍|高倍率|昂贵|贵)",
+    re.I,
+)
 AI_NODE_RES = [
     re.compile(r"ChatGPT", re.I),
-    re.compile(r"\bRe\b", re.I),
+    re.compile(r"OpenAI", re.I),
+    re.compile(r"Claude", re.I),
+    re.compile(r"Gemini", re.I),
     re.compile(r"住宅|静态|家宽|ISP|Residential|Static", re.I),
 ]
 ALLOWED_AI_REGION_RE = re.compile(
@@ -67,6 +78,30 @@ def warn(message: str) -> None:
 
 def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def runtime_timeout() -> float:
+    try:
+        return max(float(CURL_MAX_TIME) + 3.0, 5.0)
+    except ValueError:
+        return 11.0
+
+
+def atomic_write_text(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        tmp_path = pathlib.Path(handle.name)
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
 
 
 def clean_yaml_scalar(value: str) -> str:
@@ -136,9 +171,36 @@ def backup(path: pathlib.Path) -> pathlib.Path | None:
     return backup_path
 
 
-def latest_backup(path: pathlib.Path) -> pathlib.Path | None:
+def original_backup(path: pathlib.Path) -> pathlib.Path:
+    return path.with_name(f"{path.name}{ORIGINAL_BACKUP_SUFFIX}")
+
+
+def ensure_original_backup(path: pathlib.Path, current_text: str) -> pathlib.Path | None:
+    if not path.exists() or contains_router_script(current_text):
+        return None
+
+    backup_path = original_backup(path)
+    if not backup_path.exists():
+        shutil.copy2(path, backup_path)
+    return backup_path
+
+
+def latest_backup(path: pathlib.Path, *, router_ok: bool = True) -> pathlib.Path | None:
     backups = sorted(path.parent.glob(f"{path.name}.bak-*"), reverse=True)
+    if not router_ok:
+        backups = [
+            candidate
+            for candidate in backups
+            if not contains_router_script(read_text(candidate))
+        ]
     return backups[0] if backups else None
+
+
+def rollback_backup(path: pathlib.Path) -> pathlib.Path | None:
+    stable_original = original_backup(path)
+    if stable_original.exists():
+        return stable_original
+    return None
 
 
 def contains_router_script(text: str) -> bool:
@@ -166,6 +228,10 @@ def curl_json(path: str, method: str = "GET", data: dict | None = None) -> dict 
         str(SOCKET),
         "-X",
         method,
+        "--connect-timeout",
+        CURL_CONNECT_TIMEOUT,
+        "--max-time",
+        CURL_MAX_TIME,
         "http://127.0.0.1" + path,
         "-w",
         "\n%{http_code}",
@@ -174,8 +240,16 @@ def curl_json(path: str, method: str = "GET", data: dict | None = None) -> dict 
         cmd.extend(["-H", "Content-Type: application/json", "-d", json.dumps(data, ensure_ascii=False)])
 
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=runtime_timeout(),
+        )
     except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired:
         return None
 
     stdout = result.stdout.rstrip()
@@ -327,19 +401,26 @@ def install(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("dry-run：不会写入文件。")
         if target.exists():
-            print("将会先备份原脚本，再写入 Clash AI Router profile script。")
+            print("将会保存安装前原始脚本并创建时间戳备份，再写入 Clash AI Router profile script。")
         else:
             print("目标脚本不存在，将会创建新文件。")
         return 0
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    current_text = read_text(target) if target.exists() else ""
+    original_backup_path = ensure_original_backup(target, current_text)
+    if original_backup_path:
+        ok(f"已保存安装前原始脚本：{original_backup_path}")
+    elif target.exists() and contains_router_script(current_text):
+        warn("当前脚本已是 Clash AI Router，不会覆盖安装前原始备份。")
+
     backup_path = backup(target)
     if backup_path:
         ok(f"已备份原脚本：{backup_path}")
     else:
         warn("目标脚本原先不存在，没有生成备份。")
 
-    target.write_text(content, encoding="utf-8")
+    atomic_write_text(target, content)
     ok("已安装 Clash AI Router profile script")
     print("下一步：在 Clash Verge Rev 里刷新当前订阅/配置，然后运行：")
     print("python3 bin/clash-ai-router test --strict")
@@ -371,17 +452,15 @@ def status(_: argparse.Namespace) -> int:
 
     for name in [AI_AUTO, FOREIGN_AUTO, FOREIGN_SELECT]:
         if name in groups:
-            now = groups[name].get("now", "")
             choices = len(group_choices(groups[name]))
-            ok(f"运行时分组存在：{name} -> {now}（候选 {choices} 个）")
+            ok(f"运行时分组存在：{name}（候选 {choices} 个）")
         else:
             warn(f"运行时缺少分组：{name}")
 
     wrapper = next((name for name in [AI_SELECT, LEGACY_AI_SELECT] if name in groups), None)
     if wrapper:
-        now = groups[wrapper].get("now", "")
         choices = len(group_choices(groups[wrapper]))
-        ok(f"运行时 AI 兜底分组存在：{wrapper} -> {now}（候选 {choices} 个）")
+        ok(f"运行时 AI 兜底分组存在：{wrapper}（候选 {choices} 个）")
     else:
         warn(f"运行时缺少 AI 兜底分组：{AI_SELECT}")
     return 0
@@ -434,7 +513,7 @@ def test_strict(_: argparse.Namespace) -> int:
 
         expect(bool(ai_choices), f"{AI_AUTO} 有候选项", f"{AI_AUTO} 没有候选项。")
         expect(bool(real_ai_choices), f"{AI_AUTO} 有真实代理候选", f"{AI_AUTO} 没有真实代理候选；只看到 DIRECT/内置选项。")
-        expect(not costly_ai_choices, f"{AI_AUTO} 未包含高倍率候选", f"{AI_AUTO} 包含高倍率候选：{', '.join(costly_ai_choices[:5])}")
+        expect(not costly_ai_choices, f"{AI_AUTO} 未包含高倍率候选", f"{AI_AUTO} 包含 {len(costly_ai_choices)} 个高倍率候选。")
         expect(
             bool(allowed_ai_choices),
             f"{AI_AUTO} 至少包含一个看起来适合 AI 的地区候选",
@@ -478,9 +557,9 @@ def rollback(args: argparse.Namespace) -> int:
     if target is None:
         return fail(manual_script_help())
 
-    backup_path = pathlib.Path(args.backup).expanduser() if args.backup else latest_backup(target)
+    backup_path = pathlib.Path(args.backup).expanduser() if args.backup else rollback_backup(target)
     if backup_path is None:
-        return fail(f"没有找到可回滚的备份：{target.name}.bak-*")
+        return fail(f"没有找到可回滚的安装前备份：{target.name}{ORIGINAL_BACKUP_SUFFIX}。如需恢复其他备份，请显式使用 --backup。")
     if not backup_path.exists():
         return fail(f"备份文件不存在：{backup_path}")
 
@@ -491,7 +570,7 @@ def rollback(args: argparse.Namespace) -> int:
         return 0
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(backup_path, target)
+    atomic_write_text(target, read_text(backup_path))
     ok("已回滚 profile script")
     print("下一步：在 Clash Verge Rev 里刷新当前订阅/配置，然后运行 status 或 test --strict。")
     return 0
@@ -508,7 +587,7 @@ def uninstall(args: argparse.Namespace) -> int:
     if not contains_router_script(text):
         return fail("当前 profile script 不像 Clash AI Router；为了避免误删用户脚本，已停止。")
 
-    backup_path = latest_backup(target)
+    backup_path = rollback_backup(target)
     if backup_path is None:
         return fail("找不到安装前备份；为了避免误删用户脚本，请手动处理当前 profile script。")
 
@@ -517,8 +596,8 @@ def uninstall(args: argparse.Namespace) -> int:
         print("dry-run：不会写入文件。")
         return 0
 
-    shutil.copy2(backup_path, target)
-    ok("已卸载 Clash AI Router，并恢复最近备份")
+    atomic_write_text(target, read_text(backup_path))
+    ok("已卸载 Clash AI Router，并恢复安装前备份")
     print("下一步：在 Clash Verge Rev 里刷新当前订阅/配置。")
     return 0
 
@@ -545,13 +624,13 @@ def main() -> int:
     select_parser = sub.add_parser("select-auto", help=f"把 {AI_SELECT} 设置为 {AI_AUTO}")
     select_parser.set_defaults(func=select_auto)
 
-    rollback_parser = sub.add_parser("rollback", help="恢复最近一次安装前备份")
+    rollback_parser = sub.add_parser("rollback", help="恢复安装前原始备份")
     rollback_parser.add_argument("--dry-run", action="store_true", help="只显示将恢复哪个备份，不实际修改")
     rollback_parser.add_argument("--target", help="手动指定 script 文件路径")
     rollback_parser.add_argument("--backup", help="手动指定备份文件路径")
     rollback_parser.set_defaults(func=rollback)
 
-    uninstall_parser = sub.add_parser("uninstall", help="通过恢复最近备份来卸载 Clash AI Router")
+    uninstall_parser = sub.add_parser("uninstall", help="通过恢复安装前原始备份来卸载 Clash AI Router")
     uninstall_parser.add_argument("--dry-run", action="store_true", help="只显示将恢复哪个备份，不实际修改")
     uninstall_parser.add_argument("--target", help="手动指定 script 文件路径")
     uninstall_parser.set_defaults(func=uninstall)

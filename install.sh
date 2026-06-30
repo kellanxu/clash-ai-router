@@ -12,7 +12,10 @@ echo "== Clash AI Router installer =="
 echo
 
 echo "[1/5] 运行环境检查"
-python3 bin/clash-ai-router doctor
+if ! python3 bin/clash-ai-router doctor; then
+  echo "[ERR] 环境检查未通过，已停止安装。" >&2
+  exit 1
+fi
 
 echo
 echo "[2/5] 预览安装目标"
@@ -55,4 +58,4 @@ cat <<'EOF'
 只有 test --strict 退出码为 0，才算真正安装完成。
 EOF
 
-exit 1
+exit 2

@@ -103,7 +103,7 @@ Strict verification checks that:
 - runtime group `普通国外` exists;
 - `AI代理` points to `AI自动可用`;
 - `AI自动可用` has at least one real proxy candidate;
-- `AI自动可用` does not include costly `12x`-style candidates;
+- `AI自动可用` does not include costly high-multiplier candidates such as `5x`, `8x`, `10x`, or `12x`;
 - at least one candidate appears to be in an allowed AI region.
 
 Do not use `status` as final verification. `status` is informational and can return success even when runtime verification is unavailable.
@@ -162,7 +162,7 @@ Tell the user that node recognition depends on node names. Suggest one of:
 
 ## Rollback
 
-To restore the latest backup:
+To restore the original pre-install backup:
 
 ```bash
 python3 bin/clash-ai-router rollback
@@ -174,10 +174,10 @@ To preview rollback:
 python3 bin/clash-ai-router rollback --dry-run
 ```
 
-To uninstall by restoring the latest backup:
+To uninstall by restoring the original pre-install backup:
 
 ```bash
 python3 bin/clash-ai-router uninstall
 ```
 
-The helper intentionally refuses to delete the current script if no backup exists.
+The helper intentionally refuses to delete the current script if no pre-install backup exists.
