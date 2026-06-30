@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and inspect Clash AI Router for Clash Verge Rev."""
+"""Install, inspect, verify, and roll back Clash AI Router for Clash Verge Rev."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import datetime as dt
 import json
 import os
 import pathlib
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import urllib.parse
-
 
 APP_DIR = pathlib.Path(
     os.environ.get(
@@ -23,6 +23,33 @@ APP_DIR = pathlib.Path(
 ).expanduser()
 PROFILE_SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "clash-ai-router.profile.js"
 SOCKET = pathlib.Path(os.environ.get("MIHOMO_SOCKET", "/tmp/verge/verge-mihomo.sock"))
+
+MARKER = "Clash AI Router profile script"
+AI_AUTO = "AI自动可用"
+AI_SELECT = "AI代理"
+LEGACY_AI_SELECT = "AI住宅IP"
+FOREIGN_AUTO = "国外自动可用"
+FOREIGN_SELECT = "普通国外"
+EXPECTED_GROUPS = [AI_AUTO, AI_SELECT, FOREIGN_AUTO, FOREIGN_SELECT]
+
+COSTLY_NODE_RE = re.compile(r"(?:\b12(?:\.0+)?x\b|12(?:\.0+)?倍|12倍流量)", re.I)
+AI_NODE_RES = [
+    re.compile(r"ChatGPT", re.I),
+    re.compile(r"\bRe\b", re.I),
+    re.compile(r"住宅|静态|家宽|ISP|Residential|Static", re.I),
+]
+ALLOWED_AI_REGION_RE = re.compile(
+    r"台湾|Taiwan|日本|Japan|美国|United\s*States|USA|\bUS\b|韩国|South\s*Korea|"
+    r"德国|Germany|英国|United\s*Kingdom|UK|巴西|Brazil|澳大利亚|Australia|悉尼|Sydney|"
+    r"新加坡|Singapore|越南|Vietnam|马来西亚|Malaysia",
+    re.I,
+)
+BLOCKED_AI_REGION_RE = re.compile(
+    r"中国|China|香港|Hong\s*Kong|\bHK\b|澳门|Macau|Russia|俄罗斯|Vladivostok|"
+    r"Moscow|莫斯科|白俄罗斯|Belarus|Iran|伊朗|North\s*Korea|朝鲜|Syria|叙利亚|"
+    r"Cuba|古巴|Venezuela|委内瑞拉",
+    re.I,
+)
 
 
 def fail(message: str) -> int:
@@ -42,41 +69,62 @@ def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def clean_yaml_scalar(value: str) -> str:
+    value = value.split("#", 1)[0].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value.strip()
+
+
+def yaml_scalar_regex(value: str) -> str:
+    escaped = re.escape(value)
+    return rf"['\"]?{escaped}['\"]?"
+
+
+def find_yaml_block_by_uid(text: str, uid: str) -> str | None:
+    pattern = yaml_scalar_regex(uid)
+    match = re.search(rf"(?ms)^- uid:\s*{pattern}\s*(?:#.*)?\n.*?(?=^- uid:|\Z)", text)
+    return match.group(0) if match else None
+
+
 def find_current_script(app_dir: pathlib.Path) -> pathlib.Path | None:
+    """Find the script file attached to the current Clash Verge Rev profile.
+
+    Clash Verge Rev stores profile metadata in profiles.yaml. The structure is simple
+    enough for a conservative parser here. If the expected shape is not found, the
+    helper fails with a clear manual fallback instead of guessing and editing YAML.
+    """
+
     profiles_yaml = app_dir / "profiles.yaml"
     if not profiles_yaml.exists():
         return None
 
     text = read_text(profiles_yaml)
-    current = re.search(r"(?m)^current:\s*([^\s#]+)\s*$", text)
+    current = re.search(r"(?m)^current:\s*(.+?)\s*$", text)
     if not current:
         return None
 
-    current_uid = re.escape(current.group(1))
-    current_block_match = re.search(
-        rf"(?ms)^- uid:\s*{current_uid}\s*$.*?(?=^- uid:|\Z)", text
-    )
-    if not current_block_match:
+    current_uid = clean_yaml_scalar(current.group(1))
+    current_block = find_yaml_block_by_uid(text, current_uid)
+    if not current_block:
         return None
 
-    current_block = current_block_match.group(0)
-    script_uid = re.search(r"(?m)^\s{4}script:\s*([^\s#]+)\s*$", current_block)
+    script_uid = re.search(r"(?m)^\s{4}script:\s*(.+?)\s*$", current_block)
     if not script_uid:
         return None
 
-    script_uid_re = re.escape(script_uid.group(1))
-    script_block_match = re.search(
-        rf"(?ms)^- uid:\s*{script_uid_re}\s*$.*?(?=^- uid:|\Z)", text
-    )
-    if not script_block_match:
+    script_block = find_yaml_block_by_uid(text, clean_yaml_scalar(script_uid.group(1)))
+    if not script_block:
         return None
 
-    script_block = script_block_match.group(0)
     script_file = re.search(r"(?m)^\s{2}file:\s*(.+?)\s*$", script_block)
     if not script_file:
         return None
 
-    return app_dir / "profiles" / script_file.group(1).strip()
+    script_path = pathlib.Path(clean_yaml_scalar(script_file.group(1))).expanduser()
+    if script_path.is_absolute():
+        return script_path
+    return app_dir / "profiles" / script_path
 
 
 def backup(path: pathlib.Path) -> pathlib.Path | None:
@@ -88,38 +136,29 @@ def backup(path: pathlib.Path) -> pathlib.Path | None:
     return backup_path
 
 
-def install(args: argparse.Namespace) -> int:
-    if not APP_DIR.exists():
-        return fail(f"Clash Verge Rev 配置目录不存在：{APP_DIR}")
-    if not PROFILE_SCRIPT.exists():
-        return fail(f"找不到内置 profile script：{PROFILE_SCRIPT}")
-
-    target = pathlib.Path(args.target).expanduser() if args.target else find_current_script(APP_DIR)
-    if target is None:
-        return fail(
-            "没有在当前 Clash Verge Rev profile 里找到 script 插槽。"
-            "可以手动把 scripts/clash-ai-router.profile.js 复制到 Profile Script。"
-        )
-
-    content = read_text(PROFILE_SCRIPT)
-    print(f"目标脚本：{target}")
-    if args.dry_run:
-        print("dry-run：不会写入文件。")
-        return 0
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    backup_path = backup(target)
-    if backup_path:
-        ok(f"已备份原脚本：{backup_path}")
-    target.write_text(content, encoding="utf-8")
-    ok("已安装 Clash AI Router profile script")
-    print("下一步：在 Clash Verge Rev 里刷新当前订阅，然后运行 status 检查。")
-    return 0
+def latest_backup(path: pathlib.Path) -> pathlib.Path | None:
+    backups = sorted(path.parent.glob(f"{path.name}.bak-*"), reverse=True)
+    return backups[0] if backups else None
 
 
-def curl_json(path: str, method: str = "GET", data: dict | None = None) -> dict | None:
+def contains_router_script(text: str) -> bool:
+    return MARKER in text and AI_AUTO in text and AI_SELECT in text
+
+
+def script_has_ai_rules(text: str) -> bool:
+    required_rules = [
+        f"DOMAIN-SUFFIX,openai.com,\" + names.aiSelect",
+        f"DOMAIN-SUFFIX,chatgpt.com,\" + names.aiSelect",
+        f"DOMAIN-SUFFIX,anthropic.com,\" + names.aiSelect",
+        f"DOMAIN-SUFFIX,claude.ai,\" + names.aiSelect",
+    ]
+    return all(rule in text for rule in required_rules)
+
+
+def curl_json(path: str, method: str = "GET", data: dict | None = None) -> dict | list | None:
     if not SOCKET.exists():
         return None
+
     cmd = [
         "curl",
         "-sS",
@@ -128,19 +167,183 @@ def curl_json(path: str, method: str = "GET", data: dict | None = None) -> dict 
         "-X",
         method,
         "http://127.0.0.1" + path,
+        "-w",
+        "\n%{http_code}",
     ]
     if data is not None:
-        cmd.extend(["-H", "Content-Type: application/json", "-d", json.dumps(data)])
+        cmd.extend(["-H", "Content-Type: application/json", "-d", json.dumps(data, ensure_ascii=False)])
+
     try:
         result = subprocess.run(cmd, check=False, capture_output=True, text=True)
     except FileNotFoundError:
         return None
-    if result.returncode != 0 or not result.stdout.strip():
+
+    stdout = result.stdout.rstrip()
+    if result.returncode != 0 or not stdout:
         return None
+
+    body, _, status_text = stdout.rpartition("\n")
     try:
-        return json.loads(result.stdout)
+        status = int(status_text.strip())
+    except ValueError:
+        return None
+
+    if status < 200 or status >= 300:
+        return None
+    if not body.strip():
+        return {}
+
+    try:
+        return json.loads(body)
     except json.JSONDecodeError:
-        return {"raw": result.stdout.strip()}
+        return {"raw": body.strip()}
+
+
+def runtime_proxies() -> dict | None:
+    runtime = curl_json("/proxies")
+    if isinstance(runtime, dict) and isinstance(runtime.get("proxies"), dict):
+        return runtime["proxies"]
+    return None
+
+
+def group_choices(group: dict | None) -> list[str]:
+    if not isinstance(group, dict):
+        return []
+    return [str(item) for item in group.get("all", []) if item]
+
+
+def is_real_proxy_choice(name: str) -> bool:
+    return name not in {
+        "DIRECT",
+        "REJECT",
+        "REJECT-DROP",
+        "PASS",
+        AI_AUTO,
+        AI_SELECT,
+        LEGACY_AI_SELECT,
+        FOREIGN_AUTO,
+        FOREIGN_SELECT,
+    }
+
+
+def is_allowed_ai_node(name: str) -> bool:
+    return (
+        is_real_proxy_choice(name)
+        and not COSTLY_NODE_RE.search(name)
+        and bool(ALLOWED_AI_REGION_RE.search(name))
+        and not BLOCKED_AI_REGION_RE.search(name)
+    )
+
+
+def looks_like_ai_node(name: str) -> bool:
+    return is_allowed_ai_node(name) and any(pattern.search(name) for pattern in AI_NODE_RES)
+
+
+def manual_script_help() -> str:
+    return (
+        "没有在当前 Clash Verge Rev profile 里找到 script 插槽。\n"
+        "处理方法：\n"
+        "1. 在 Clash Verge Rev 里给当前订阅/配置创建或打开 Profile Script / Script 扩展；\n"
+        "2. 把 scripts/clash-ai-router.profile.js 的内容复制进去；\n"
+        "3. 刷新当前订阅/配置；\n"
+        "4. 运行 python3 bin/clash-ai-router test --strict 验收。\n"
+        "如果你知道目标 script 文件路径，也可以运行：\n"
+        "python3 bin/clash-ai-router install --target /path/to/script.js"
+    )
+
+
+def doctor(_: argparse.Namespace) -> int:
+    errors: list[str] = []
+
+    print("Clash AI Router doctor")
+    print(f"Python：{sys.version.split()[0]}")
+    if sys.version_info < (3, 9):
+        errors.append("需要 Python 3.9 或更新版本。")
+    else:
+        ok("Python 版本可用")
+
+    if platform.system() == "Darwin":
+        ok("当前系统是 macOS")
+    else:
+        warn("当前不是 macOS；默认只优先支持 macOS + Clash Verge Rev。")
+
+    print(f"仓库 profile script：{PROFILE_SCRIPT}")
+    if PROFILE_SCRIPT.exists():
+        ok("内置 profile script 存在")
+    else:
+        errors.append(f"找不到内置 profile script：{PROFILE_SCRIPT}")
+
+    print(f"Clash Verge Rev 配置目录：{APP_DIR}")
+    if APP_DIR.exists():
+        ok("配置目录存在")
+    else:
+        errors.append(f"Clash Verge Rev 配置目录不存在：{APP_DIR}")
+
+    profiles_yaml = APP_DIR / "profiles.yaml"
+    print(f"profiles.yaml：{profiles_yaml}")
+    if profiles_yaml.exists():
+        ok("profiles.yaml 存在")
+    else:
+        errors.append("找不到 profiles.yaml；请先打开 Clash Verge Rev 并确保已有可用订阅/配置。")
+
+    script = find_current_script(APP_DIR)
+    if script:
+        ok(f"识别到当前 profile script：{script}")
+    else:
+        errors.append(manual_script_help())
+
+    if shutil.which("curl"):
+        ok("curl 可用")
+    else:
+        errors.append("找不到 curl；严格运行时测试需要 curl。")
+
+    print(f"Mihomo socket：{SOCKET} ({'存在' if SOCKET.exists() else '不存在'})")
+    if SOCKET.exists():
+        ok("Mihomo socket 存在，可以做运行时验证")
+    else:
+        warn("Mihomo socket 不存在；安装可以继续，但 test --strict 需要 Clash Verge Rev 正在运行。")
+
+    if errors:
+        for message in errors:
+            fail(message)
+        return 1
+
+    ok("doctor 通过，可以继续安装")
+    return 0
+
+
+def install(args: argparse.Namespace) -> int:
+    if not APP_DIR.exists():
+        return fail(f"Clash Verge Rev 配置目录不存在：{APP_DIR}")
+    if not PROFILE_SCRIPT.exists():
+        return fail(f"找不到内置 profile script：{PROFILE_SCRIPT}")
+
+    target = pathlib.Path(args.target).expanduser() if args.target else find_current_script(APP_DIR)
+    if target is None:
+        return fail(manual_script_help())
+
+    content = read_text(PROFILE_SCRIPT)
+    print(f"目标脚本：{target}")
+    if args.dry_run:
+        print("dry-run：不会写入文件。")
+        if target.exists():
+            print("将会先备份原脚本，再写入 Clash AI Router profile script。")
+        else:
+            print("目标脚本不存在，将会创建新文件。")
+        return 0
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup(target)
+    if backup_path:
+        ok(f"已备份原脚本：{backup_path}")
+    else:
+        warn("目标脚本原先不存在，没有生成备份。")
+
+    target.write_text(content, encoding="utf-8")
+    ok("已安装 Clash AI Router profile script")
+    print("下一步：在 Clash Verge Rev 里刷新当前订阅/配置，然后运行：")
+    print("python3 bin/clash-ai-router test --strict")
+    return 0
 
 
 def status(_: argparse.Namespace) -> int:
@@ -153,48 +356,170 @@ def status(_: argparse.Namespace) -> int:
         if script.exists():
             text = read_text(script)
             ok("profile script 可读取")
-            print(f"包含 AI自动可用：{'是' if 'AI自动可用' in text else '否'}")
-            has_ai_wrapper = "AI代理" in text or "AI住宅IP" in text
-            print(f"包含 AI 兜底分组：{'是' if has_ai_wrapper else '否'}")
+            print(f"包含 Clash AI Router：{'是' if contains_router_script(text) else '否'}")
+            print(f"包含 AI 域名规则：{'是' if script_has_ai_rules(text) else '否'}")
         else:
             warn("profiles.yaml 指向的 script 文件不存在")
     else:
         warn("没有识别到当前 profile 的 script 插槽")
+        print(manual_script_help())
 
-    runtime = curl_json("/proxies")
-    if not runtime or "proxies" not in runtime:
+    groups = runtime_proxies()
+    if not groups:
         warn("无法读取运行时分组；Clash 可能未运行，或 curl/socket 不可用")
         return 0
 
-    groups = runtime["proxies"]
-    expected_groups = ["AI自动可用", "国外自动可用", "普通国外"]
-    for name in expected_groups:
+    for name in [AI_AUTO, FOREIGN_AUTO, FOREIGN_SELECT]:
         if name in groups:
             now = groups[name].get("now", "")
-            choices = len(groups[name].get("all", []))
+            choices = len(group_choices(groups[name]))
             ok(f"运行时分组存在：{name} -> {now}（候选 {choices} 个）")
         else:
             warn(f"运行时缺少分组：{name}")
 
-    wrapper = next((name for name in ["AI代理", "AI住宅IP"] if name in groups), None)
+    wrapper = next((name for name in [AI_SELECT, LEGACY_AI_SELECT] if name in groups), None)
     if wrapper:
         now = groups[wrapper].get("now", "")
-        choices = len(groups[wrapper].get("all", []))
+        choices = len(group_choices(groups[wrapper]))
         ok(f"运行时 AI 兜底分组存在：{wrapper} -> {now}（候选 {choices} 个）")
     else:
-        warn("运行时缺少 AI 兜底分组：AI代理 或 AI住宅IP")
+        warn(f"运行时缺少 AI 兜底分组：{AI_SELECT}")
+    return 0
+
+
+def test_strict(_: argparse.Namespace) -> int:
+    errors: list[str] = []
+
+    def expect(condition: bool, success_message: str, error_message: str) -> None:
+        if condition:
+            ok(success_message)
+        else:
+            errors.append(error_message)
+            fail(error_message)
+
+    expect(APP_DIR.exists(), "Clash Verge Rev 配置目录存在", f"配置目录不存在：{APP_DIR}")
+
+    script = find_current_script(APP_DIR)
+    expect(script is not None, "已识别当前 profile script 插槽", manual_script_help())
+
+    text = ""
+    if script is not None:
+        expect(script.exists(), "当前 profile script 文件存在", f"profile script 文件不存在：{script}")
+        if script.exists():
+            text = read_text(script)
+            expect(contains_router_script(text), "当前 profile script 已安装 Clash AI Router", "当前 profile script 不包含 Clash AI Router。")
+            expect(script_has_ai_rules(text), "当前 profile script 包含 AI 域名规则", "当前 profile script 缺少关键 AI 域名规则。")
+
+    groups = runtime_proxies()
+    expect(groups is not None, "可以读取 Mihomo 运行时分组", "无法读取 Mihomo 运行时分组；请打开 Clash Verge Rev、启动内核并刷新当前订阅/配置。")
+
+    if groups:
+        for name in EXPECTED_GROUPS:
+            expect(name in groups, f"运行时分组存在：{name}", f"运行时缺少分组：{name}")
+
+        wrapper = groups.get(AI_SELECT)
+        if wrapper:
+            expect(
+                wrapper.get("now") == AI_AUTO,
+                f"{AI_SELECT} 当前指向 {AI_AUTO}",
+                f"{AI_SELECT} 当前没有指向 {AI_AUTO}；可运行 python3 bin/clash-ai-router select-auto。",
+            )
+
+        ai_auto_group = groups.get(AI_AUTO)
+        ai_choices = group_choices(ai_auto_group)
+        real_ai_choices = [name for name in ai_choices if is_real_proxy_choice(name)]
+        costly_ai_choices = [name for name in ai_choices if COSTLY_NODE_RE.search(name)]
+        allowed_ai_choices = [name for name in real_ai_choices if is_allowed_ai_node(name)]
+        preferred_ai_choices = [name for name in real_ai_choices if looks_like_ai_node(name)]
+
+        expect(bool(ai_choices), f"{AI_AUTO} 有候选项", f"{AI_AUTO} 没有候选项。")
+        expect(bool(real_ai_choices), f"{AI_AUTO} 有真实代理候选", f"{AI_AUTO} 没有真实代理候选；只看到 DIRECT/内置选项。")
+        expect(not costly_ai_choices, f"{AI_AUTO} 未包含高倍率候选", f"{AI_AUTO} 包含高倍率候选：{', '.join(costly_ai_choices[:5])}")
+        expect(
+            bool(allowed_ai_choices),
+            f"{AI_AUTO} 至少包含一个看起来适合 AI 的地区候选",
+            f"{AI_AUTO} 没有识别到推荐 AI 地区候选；请检查节点命名或手动选择 {AI_SELECT}。",
+        )
+        if preferred_ai_choices:
+            ok(f"识别到更像 AI 专用的候选节点：{len(preferred_ai_choices)} 个")
+        else:
+            warn("没有识别到 ChatGPT/住宅/静态/ISP 等明显 AI 专用节点，但存在可用地区候选。")
+
+    if errors:
+        print()
+        print("严格验收未通过。修复上面的错误后重新运行：")
+        print("python3 bin/clash-ai-router test --strict")
+        return 1
+
+    print()
+    ok("严格验收通过：安装、运行时分组和 AI 路由基础配置都已生效。")
     return 0
 
 
 def select_auto(_: argparse.Namespace) -> int:
-    runtime = curl_json("/proxies")
-    proxies = runtime.get("proxies", {}) if runtime else {}
-    group_name = "AI代理" if "AI代理" in proxies else "AI住宅IP"
+    groups = runtime_proxies()
+    if not groups:
+        return fail("无法读取运行时分组；Clash 可能未运行，或 curl/socket 不可用。")
+
+    group_name = AI_SELECT if AI_SELECT in groups else LEGACY_AI_SELECT if LEGACY_AI_SELECT in groups else None
+    if group_name is None:
+        return fail(f"运行时缺少 AI 兜底分组：{AI_SELECT}")
+
     group = urllib.parse.quote(group_name, safe="")
-    result = curl_json(f"/proxies/{group}", method="PUT", data={"name": "AI自动可用"})
+    result = curl_json(f"/proxies/{group}", method="PUT", data={"name": AI_AUTO})
     if result is None:
-        return fail(f"无法设置 {group_name} -> AI自动可用；Clash 可能未运行")
-    ok(f"已设置 {group_name} -> AI自动可用")
+        return fail(f"无法设置 {group_name} -> {AI_AUTO}；Clash 可能未运行。")
+    ok(f"已设置 {group_name} -> {AI_AUTO}")
+    return 0
+
+
+def rollback(args: argparse.Namespace) -> int:
+    target = pathlib.Path(args.target).expanduser() if args.target else find_current_script(APP_DIR)
+    if target is None:
+        return fail(manual_script_help())
+
+    backup_path = pathlib.Path(args.backup).expanduser() if args.backup else latest_backup(target)
+    if backup_path is None:
+        return fail(f"没有找到可回滚的备份：{target.name}.bak-*")
+    if not backup_path.exists():
+        return fail(f"备份文件不存在：{backup_path}")
+
+    print(f"目标脚本：{target}")
+    print(f"回滚来源：{backup_path}")
+    if args.dry_run:
+        print("dry-run：不会写入文件。")
+        return 0
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup_path, target)
+    ok("已回滚 profile script")
+    print("下一步：在 Clash Verge Rev 里刷新当前订阅/配置，然后运行 status 或 test --strict。")
+    return 0
+
+
+def uninstall(args: argparse.Namespace) -> int:
+    target = pathlib.Path(args.target).expanduser() if args.target else find_current_script(APP_DIR)
+    if target is None:
+        return fail(manual_script_help())
+    if not target.exists():
+        return fail(f"profile script 文件不存在：{target}")
+
+    text = read_text(target)
+    if not contains_router_script(text):
+        return fail("当前 profile script 不像 Clash AI Router；为了避免误删用户脚本，已停止。")
+
+    backup_path = latest_backup(target)
+    if backup_path is None:
+        return fail("找不到安装前备份；为了避免误删用户脚本，请手动处理当前 profile script。")
+
+    print(f"将通过回滚备份来卸载：{backup_path}")
+    if args.dry_run:
+        print("dry-run：不会写入文件。")
+        return 0
+
+    shutil.copy2(backup_path, target)
+    ok("已卸载 Clash AI Router，并恢复最近备份")
+    print("下一步：在 Clash Verge Rev 里刷新当前订阅/配置。")
     return 0
 
 
@@ -202,16 +527,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Clash AI Router helper")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    doctor_parser = sub.add_parser("doctor", help="检查本机环境是否适合自动安装")
+    doctor_parser.set_defaults(func=doctor)
+
     install_parser = sub.add_parser("install", help="安装 profile script 到当前 Clash Verge Rev profile")
     install_parser.add_argument("--dry-run", action="store_true", help="只显示将写入哪里，不实际修改")
     install_parser.add_argument("--target", help="手动指定 script 文件路径")
     install_parser.set_defaults(func=install)
 
-    status_parser = sub.add_parser("status", help="检查本机安装和运行时状态")
+    status_parser = sub.add_parser("status", help="展示本机安装和运行时状态；不作为严格验收")
     status_parser.set_defaults(func=status)
 
-    select_parser = sub.add_parser("select-auto", help="把 AI代理 设置为 AI自动可用")
+    test_parser = sub.add_parser("test", help="严格验收安装效果；适合 Agent/CI 使用")
+    test_parser.add_argument("--strict", action="store_true", help="兼容显式写法；test 默认就是严格验收")
+    test_parser.set_defaults(func=test_strict)
+
+    select_parser = sub.add_parser("select-auto", help=f"把 {AI_SELECT} 设置为 {AI_AUTO}")
     select_parser.set_defaults(func=select_auto)
+
+    rollback_parser = sub.add_parser("rollback", help="恢复最近一次安装前备份")
+    rollback_parser.add_argument("--dry-run", action="store_true", help="只显示将恢复哪个备份，不实际修改")
+    rollback_parser.add_argument("--target", help="手动指定 script 文件路径")
+    rollback_parser.add_argument("--backup", help="手动指定备份文件路径")
+    rollback_parser.set_defaults(func=rollback)
+
+    uninstall_parser = sub.add_parser("uninstall", help="通过恢复最近备份来卸载 Clash AI Router")
+    uninstall_parser.add_argument("--dry-run", action="store_true", help="只显示将恢复哪个备份，不实际修改")
+    uninstall_parser.add_argument("--target", help="手动指定 script 文件路径")
+    uninstall_parser.set_defaults(func=uninstall)
 
     args = parser.parse_args()
     return args.func(args)
